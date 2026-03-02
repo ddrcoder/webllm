@@ -1,7 +1,8 @@
-import type {ChatCompletionMessageParam} from "@mlc-ai/web-llm/lib/openai_api_protocols/chat_completion";
 import type {MLCEngine} from "@mlc-ai/web-llm";
-import {setDownloadStatus, setMessageHistory, setCriticalError} from "./redux/llmSlice.ts";
-import {dispatch, getState} from "./redux/store.ts";
+import {
+    setModelStatus, setModelReady, setCriticalError
+} from "./redux/dfsSlice.ts";
+import {dispatch} from "./redux/store.ts";
 
 let libraryCache: any = null;
 
@@ -10,75 +11,77 @@ async function getLibrary() {
         return libraryCache;
     }
     const {CreateMLCEngine} = await import("@mlc-ai/web-llm");
-    return {CreateMLCEngine};
+    libraryCache = {CreateMLCEngine};
+    return libraryCache;
 }
 
-let model: MLCEngine;
+let engine: MLCEngine | null = null;
+
+export function getEngine(): MLCEngine | null {
+    return engine;
+}
 
 export async function downloadModel(name: string) {
-
     try {
-        dispatch(setDownloadStatus('loading LLM library'));
+        dispatch(setModelStatus('Loading LLM library...'));
         const {CreateMLCEngine} = await getLibrary();
-        dispatch(setDownloadStatus('loading model ' + name));
-        // List of all models https://mlc.ai/models
-        model = await CreateMLCEngine(
+        dispatch(setModelStatus('Loading model ' + name + '...'));
+        engine = await CreateMLCEngine(
             name,
             {
                 initProgressCallback: (p: any) => {
                     if (p?.text) {
-                        dispatch(setDownloadStatus(p.text));
+                        dispatch(setModelStatus(p.text));
                     }
                 }
             }
         );
     } catch (error: any) {
-        if (error.message) {
-            dispatch(setCriticalError(error.message));
-        } else {
-            dispatch(setCriticalError(JSON.stringify(error)));
-        }
-        dispatch(setDownloadStatus('Error. Please check that WebGPU is enabled https://webgpureport.org'));
+        const msg = error.message || JSON.stringify(error);
+        dispatch(setCriticalError(msg));
+        dispatch(setModelStatus('Error loading model'));
         console.error(error);
         return;
     }
-    dispatch(setDownloadStatus('done'));
+    dispatch(setModelStatus('Model ready'));
+    dispatch(setModelReady(true));
     localStorage.setItem('downloaded_models', JSON.stringify([name]));
 }
 
-export async function sendPrompt(message: string, maxTokens = 1000) {
-    const messagesHistory = getState(state => state.llm.messageHistory);
-    const newUserMessage: ChatCompletionMessageParam = {role: 'user', content: message};
-    let updatedHistory = [...messagesHistory, newUserMessage];
-    dispatch(setMessageHistory(updatedHistory));
+export async function generateWords(
+    sentence: string,
+    missingLetters: string[],
+    count: number = 3
+): Promise<string[]> {
+    if (!engine) throw new Error("Model not loaded");
 
-    if (!model) {
-        throw new Error("Model not loaded");
-    }
+    const missing = missingLetters.join(', ');
+    const prompt = sentence
+        ? `I'm writing a pangram (a sentence using every letter A-Z at least once). So far: "${sentence}". Letters still needed: ${missing}. Suggest ${count} different single common English words that could naturally continue this sentence while using as many of the missing letters as possible. Reply with ONLY the ${count} words, one per line, no numbering or extra text.`
+        : `I'm writing a pangram (a sentence using every letter A-Z at least once). Letters still needed: ${missing}. Suggest ${count} different single common English words to START a sentence, choosing words that use as many of the missing letters as possible. Reply with ONLY the ${count} words, one per line, no numbering or extra text.`;
 
-    const stream = await model.chat.completions.create({
-        messages: updatedHistory,
-        stream: true,
-        max_tokens: maxTokens,
+    const response = await engine.chat.completions.create({
+        messages: [{role: 'user', content: prompt}],
+        max_tokens: 50,
+        temperature: 0.9,
+        top_p: 0.95,
     });
-    const response: ChatCompletionMessageParam = {
-        role: "assistant",
-        content: ""
-    };
-    updatedHistory = [...updatedHistory, response];
-    dispatch(setMessageHistory(updatedHistory));
 
-    for await (const chunk of stream) {
-        const delta = chunk?.choices?.[0]?.delta?.content ?? "";
-        if (delta) {
-            const current = getState(state => state.llm.messageHistory);
-            const updated = [...current];
-            const lastIndex = updated.length - 1;
-            updated[lastIndex] = {
-                ...updated[lastIndex],
-                content: updated[lastIndex].content + delta
-            };
-            dispatch(setMessageHistory(updated));
+    const text = response.choices?.[0]?.message?.content ?? "";
+    const words = text
+        .split('\n')
+        .map(w => w.trim().replace(/^[\d.)\-*]+\s*/, '').replace(/[^a-zA-Z]/g, '').toLowerCase())
+        .filter(w => w.length > 0 && w.length <= 15);
+
+    // Deduplicate
+    const seen = new Set<string>();
+    const unique: string[] = [];
+    for (const w of words) {
+        if (!seen.has(w)) {
+            seen.add(w);
+            unique.push(w);
         }
     }
+
+    return unique.slice(0, count);
 }
