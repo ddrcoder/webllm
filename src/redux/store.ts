@@ -1,10 +1,12 @@
 import {configureStore} from "@reduxjs/toolkit";
 import {llmReducer} from "./llmSlice.ts";
+import {dfsReducer} from "./dfsSlice.ts";
 import {useDispatch, useSelector, type TypedUseSelectorHook} from 'react-redux'
 
 export const store = configureStore({
     reducer: {
         llm: llmReducer,
+        dfs: dfsReducer,
     },
 })
 
